@@ -1,0 +1,13 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "7462:8000"
+    volumes:
+      - ./data:/app/data
+      - ./users/user_data.json:/app/users/user_data.json
+    restart: unless-stopped
