@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+from datetime import datetime
+
 from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -21,6 +23,11 @@ from telegram.ext import (
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 DOMAIN_NAME = os.getenv("DOMAIN_NAME")
+
+# Texts from .env
+WELCOME_TEXT = os.getenv("WELCOME_TEXT", "Welcome! Your user ID has been registered.")
+NOTIFY_PROMPT = os.getenv("NOTIFY_PROMPT", "Do you want to notify all users about this upload?")
+UPDATE_TEXT = os.getenv("UPDATE_TEXT", "A new image has been uploaded!")
 
 # Enable logging
 logging.basicConfig(
@@ -46,39 +53,85 @@ if not os.path.exists(USER_DATA_FILE):
 # Initialize the Telegram bot application
 application = Application.builder().token(TOKEN).build()
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command and register the user."""
     user_id = update.effective_user.id
-    await update.message.reply_text("Welcome! Your user ID has been registered.")
     register_user(user_id)
+    await update.message.reply_text(WELCOME_TEXT)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle photo uploads.
+    After saving the photo, prompt the user to notify all other users.
+    """
+    user = update.effective_user
+    photo = update.message.photo[-1]
+    caption = update.message.caption or "image"
+
+    # Build the filename: yy-mm-dd-hh-mm-ss-username-img_name.jpg
+    now_str = datetime.now().strftime("%y-%m-%d-%H-%M-%S")
+    username_str = user.username if user.username else str(user.id)
+    # Make sure we remove any spaces in caption
+    sanitized_caption = caption.replace(" ", "_")
+    filename = f"{now_str}-{username_str}-{sanitized_caption}.jpg"
+    file_path = os.path.join(IMAGE_DIR, filename)
+
+    # Download the file
+    file_obj = await context.bot.get_file(photo.file_id)
+    await file_obj.download_to_drive(file_path)
+    await update.message.reply_text("Image received and saved.")
+
+    # Prompt user whether to notify everyone
+    keyboard = [
+        [
+            InlineKeyboardButton("Yes", callback_data="notify_yes"),
+            InlineKeyboardButton("No", callback_data="notify_no")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Send the notification prompt
+    await update.message.reply_text(NOTIFY_PROMPT, reply_markup=reply_markup)
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button presses."""
+    """Handle all button presses (InlineKeyboardButton callbacks)."""
     query = update.callback_query
     await query.answer()
+
     if query.data == "upload_image":
         await query.message.reply_text("Please upload an image.")
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle photo uploads."""
-    photo = update.message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    file_path = os.path.join(IMAGE_DIR, f"{photo.file_id}.jpg")
-    await file.download_to_drive(file_path)
-    await update.message.reply_text("Image received and saved.")
-    # Broadcast the image to all users
-    for user_id in get_all_user_ids():
-        try:
-            with open(file_path, "rb") as img:
-                await context.bot.send_photo(chat_id=user_id, photo=InputFile(img))
-        except Exception as e:
-            logger.error(f"Failed to send image to {user_id}: {e}")
+    elif query.data == "notify_yes":
+        # Delete the original message with buttons
+        await query.message.delete()
+
+        # Broadcast the update text to all users
+        user_ids = get_all_user_ids()
+        for user_id in user_ids:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=UPDATE_TEXT)
+            except Exception as e:
+                logger.error(f"Failed to send notification to {user_id}: {e}")
+
+        await query.message.reply_text("All users have been notified!")
+
+    elif query.data == "notify_no":
+        # Delete the original message with buttons
+        await query.message.delete()
+
+        # Acknowledge that no action was taken
+        await query.message.reply_text("Okay, I won't notify anyone.")
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle plain text messages (non-photo, non-command)."""
     user_text = update.message.text
     logger.info(f"User sent text message: {user_text}")
     await update.message.reply_text(f"You said: {user_text}")
+
 
 def register_user(user_id: int) -> None:
     """Register a new user by adding their user ID to the JSON file."""
@@ -88,8 +141,10 @@ def register_user(user_id: int) -> None:
         user_ids.append(user_id)
         with open(USER_DATA_FILE, "w") as file:
             json.dump(user_ids, file)
+        logger.info(f"Registered new user: {user_id}")
     else:
         logger.info(f"User {user_id} is already registered.")
+
 
 def get_all_user_ids() -> list:
     """Retrieve all registered user IDs from the JSON file."""
@@ -97,12 +152,13 @@ def get_all_user_ids() -> list:
         user_ids = json.load(file)
     return user_ids
 
+
 async def telegram_webhook(request: Request) -> PlainTextResponse:
     """Webhook endpoint for Telegram updates."""
     # Log incoming request for debugging
     try:
         data = await request.json()
-        logger.info(f"Incoming update: {data}")
+        logger.debug(f"Incoming update: {data}")
     except Exception as e:
         logger.error(f"Failed to parse incoming update: {e}")
         return PlainTextResponse("Error parsing JSON", status_code=400)
@@ -111,6 +167,7 @@ async def telegram_webhook(request: Request) -> PlainTextResponse:
     update = Update.de_json(data, application.bot)
     await application.process_update(update)
     return PlainTextResponse("OK")
+
 
 async def get_last_img(request: Request) -> Response:
     """Serve the latest uploaded image."""
@@ -133,6 +190,7 @@ async def get_last_img(request: Request) -> Response:
         logger.error(f"Error serving the latest image: {e}")
         return JSONResponse({"error": "Internal server error."}, status_code=500)
 
+
 # Define the routes for the Starlette application
 routes = [
     Route("/telegram", endpoint=telegram_webhook, methods=["POST"]),
@@ -146,8 +204,8 @@ async def on_startup() -> None:
     """Configure handlers and set webhook on startup."""
     # 1) Add all your handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # 2) Initialize the PTB Application
@@ -173,8 +231,8 @@ app.add_event_handler("shutdown", on_shutdown)
 # Mount the static files directory to serve images
 app.mount("/data", StaticFiles(directory=IMAGE_DIR), name="data")
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     import uvicorn
     # Ensure you run on HTTPS if you’re exposing this publicly,
     # or use an HTTPS reverse proxy in front of this app.
-    uvicorn.run(app, host="0.0.0.0", port=7462)
+    uvicorn.run(app, host="0.0.0.0", port=7462) 
