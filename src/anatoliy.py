@@ -31,12 +31,14 @@ logger = logging.getLogger(__name__)
 # Directory to save uploaded images
 IMAGE_DIR = "./data"
 os.makedirs(IMAGE_DIR, exist_ok=True)
+USER_DATA_DIR = "./users"
+os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-# File to store user data
-USER_DATA_FILE = "./users/user_data.json"
+USER_DATA_FILE = os.path.join(USER_DATA_DIR, "user_data.json")
 if not os.path.exists(USER_DATA_FILE):
     with open(USER_DATA_FILE, "w") as file:
         json.dump([], file)
+
 
 # Initialize the Telegram bot application
 application = Application.builder().token(TOKEN).build()
@@ -85,10 +87,10 @@ def get_all_user_ids() -> list:
     return user_ids
 
 async def telegram_webhook(request: Request) -> PlainTextResponse:
-    """Handle incoming Telegram updates."""
     data = await request.json()
+    logger.info(f"Incoming update: {data}")
     update = Update.de_json(data, application.bot)
-    await application.update_queue.put(update)
+    await application.process_update(update)
     return PlainTextResponse("OK")
 
 async def get_last_img(request: Request) -> Response:
