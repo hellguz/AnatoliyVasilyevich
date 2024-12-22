@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     ports:
-      - "7462:8000"
+      - "7462:7462"
     volumes:
       - ./data:/app/data
       - ./users/user_data.json:/app/users/user_data.json
