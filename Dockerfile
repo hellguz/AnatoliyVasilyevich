@@ -20,5 +20,5 @@ COPY . .
 # Expose the port that the app runs on
 EXPOSE 7462
 
-# Command to run the application
-CMD ["python", "anatoliy.py"]
+# Command to run the application with hot-reload
+CMD ["uvicorn", "anatoliy:app", "--host", "0.0.0.0", "--port", "7462", "--reload"]

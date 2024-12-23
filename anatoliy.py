@@ -9,6 +9,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, PlainTextResponse
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
+from PIL import Image
+import io
+import hashlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     Application,
@@ -180,8 +183,25 @@ async def get_last_img(request: Request) -> Response:
         )
         if image_files:
             latest_image_path = image_files[0]
+            
+
+            # 2) Open with Pillow
+            img = Image.open(latest_image_path)
+
+            # 3) Resize to 255x122 (unproportional)
+            img = img.resize((256, 122), Image.Resampling.NEAREST)
+
+            # 4) Convert to pure black & white (1-bit), no grayscale
+            #    "1" mode => each pixel is either 0 or 255
+            #    dither=NONE => no dithering
+            img = img.convert("1", dither=Image.Dither.NONE)
+            
+        
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='JPEG')
+            img_byte_arr.seek(0)
             return Response(
-                content=open(latest_image_path, "rb").read(),
+                content=img_byte_arr.read(),
                 media_type="image/jpeg"
             )
         else:
@@ -190,11 +210,115 @@ async def get_last_img(request: Request) -> Response:
         logger.error(f"Error serving the latest image: {e}")
         return JSONResponse({"error": "Internal server error."}, status_code=500)
 
+async def get_last_xbm(request: Request) -> Response:
+    """
+    Return the latest uploaded image as an XBM text, after:
+      1) Resizing (unproportionally) to 255x122
+      2) Converting to pure black & white (no grayscale)
+      3) Generating a valid XBM string
+    """
+    try:
+        # 1) Get list of .jpg files, newest first
+        image_files = sorted(
+            (os.path.join(IMAGE_DIR, f) for f in os.listdir(IMAGE_DIR) if f.endswith(".jpg")),
+            key=os.path.getmtime,
+            reverse=True
+        )
+        if not image_files:
+            return JSONResponse({"error": "No images found."}, status_code=404)
+
+        latest_image_path = image_files[0]
+
+        # 2) Open with Pillow
+        img = Image.open(latest_image_path)
+
+        # 3) Resize to 255x122 (unproportional)
+        img = img.resize((256, 122), Image.Resampling.NEAREST)
+
+        # 4) Convert to pure black & white (1-bit), no grayscale
+        #    "1" mode => each pixel is either 0 or 255
+        #    dither=NONE => no dithering
+        img = img.convert("1", dither=Image.Dither.NONE)
+
+        # 5) Build an XBM string manually
+        xbm_str = generate_xbm_string(img)
+
+        # Return as text
+        return PlainTextResponse(xbm_str, media_type="text/plain")
+    except Exception as e:
+        logger.error(f"Error creating XBM: {e}")
+        return JSONResponse({"error": "Internal server error."}, status_code=500)
+    
+def generate_xbm_string(img: Image.Image) -> str:
+    """
+    Generate a minimal XBM string from a 1-bit Pillow image.
+    We'll assume the image is exactly 255x122 in '1' mode.
+    """
+    width, height = img.size
+    pixels = img.load()
+
+    # We'll build a list of hex values, 1 bit per pixel => 8 pixels per byte
+    xbm_data = []
+    byte_val = 0
+    bit_index = 0
+
+    # Pillow '1' mode => 0=Black, 255=White
+    # Let's define 'black' as bit=1, 'white' as bit=0
+    for y in range(height):
+        for x in range(width):
+            pixel_value = pixels[x, y]  # 0 or 255
+            bit = 1 if pixel_value == 0 else 0
+            byte_val |= (bit << bit_index)
+            bit_index += 1
+            if bit_index == 8:
+                xbm_data.append(f"0x{byte_val:02x}")
+                byte_val = 0
+                bit_index = 0
+
+    # If width*height is not a multiple of 8, flush the last partial byte
+    if bit_index > 0:
+        xbm_data.append(f"0x{byte_val:02x}")
+
+    # Build the final text output
+    xbm_str = f"#define wifi_width {width}\n"
+    xbm_str += f"#define wifi_height {height}\n"
+    xbm_str += "static const unsigned char wifi_bits[] = {\n  "
+    xbm_str += ", ".join(xbm_data)
+    xbm_str += "\n};\n"
+
+    return xbm_str
+
+async def get_last_md5(request: Request) -> JSONResponse:
+    """
+    Return the MD5 hash of the latest uploaded image file.
+    """
+    try:
+        # Get the list of image files, sorted by modification time (newest first)
+        image_files = sorted(
+            (os.path.join(IMAGE_DIR, f) for f in os.listdir(IMAGE_DIR) if f.endswith(".jpg")),
+            key=os.path.getmtime,
+            reverse=True
+        )
+        if not image_files:
+            return JSONResponse({"error": "No images found."}, status_code=404)
+
+        latest_image_path = image_files[0]
+
+        # Compute the MD5 hash of the file
+        with open(latest_image_path, "rb") as file:
+            file_hash = hashlib.md5(file.read()).hexdigest()
+
+        return Response(file_hash)
+    except Exception as e:
+        logger.error(f"Error calculating MD5 hash: {e}")
+        return JSONResponse({"error": "Internal server error."}, status_code=500)
 
 # Define the routes for the Starlette application
 routes = [
     Route("/telegram", endpoint=telegram_webhook, methods=["POST"]),
     Route("/get_last_img", endpoint=get_last_img, methods=["GET"]),
+    Route("/get_last_xbm", endpoint=get_last_xbm, methods=["GET"]), 
+    Route("/get_last_md5", endpoint=get_last_md5, methods=["GET"]),
 ]
 
 # Initialize the Starlette application

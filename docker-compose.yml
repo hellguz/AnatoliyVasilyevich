@@ -8,6 +8,7 @@ services:
     ports:
       - "7462:7462"
     volumes:
+      - ./:/app
       - ./data:/app/data
       - ./users/user_data.json:/app/users/user_data.json
     restart: unless-stopped
