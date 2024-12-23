@@ -1,8 +1,8 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include "HT_lCMEN2R13EFC1.h"
-// #include "images.h"
-// #include "html.h"
+#include "images.h"
+#include "html.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
