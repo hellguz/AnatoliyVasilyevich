@@ -3,3 +3,4 @@ starlette
 uvicorn
 python-dotenv
 serial
+pillow
