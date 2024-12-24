@@ -1,8 +1,6 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include "HT_lCMEN2R13EFC1.h"
-#include "images.h"
-#include "html.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
@@ -36,6 +34,12 @@ const char *ANATOLIY_WIFI_BOOK = "https://anatoliy.i-am-hellguz.uk/get_wifi_book
 const unsigned long CHECK_FREQUENCY_MS = 10 * 1000;  // For MD5 check
 const unsigned long WIFI_RESCAN_MS = 30 * 1000;      // For Wi-Fi re-scan if disconnected
 const unsigned long WIFI_BOOK_MS = 30 * 1000;        // How often to fetch new Wi-Fi Book
+
+// XBM values
+#define WiFi_Logo_width 250
+#define WiFi_Logo_height 122
+ uint8_t WiFi_Logo_bits[10000] PROGMEM = {
+};
 
 // E-Paper, Web server, Preferences
 Preferences prefs;
@@ -105,13 +109,6 @@ void setup() {
 
   // Attempt Wi-Fi connection at startup
   connectToWiFi();
-
-  // Start web server
-  server.on("/", []() {
-    server.send(200, "text/html", index_html);
-  });
-  server.on("/set", HTTP_GET, Config_Callback);
-  server.begin();
 }
 
 // -----------------------------------------------------
