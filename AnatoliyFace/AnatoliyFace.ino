@@ -6,54 +6,61 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
+#include <vector>  // for dynamic array
 
+// -----------------------------------------------------
+// Hard-coded networks
+struct KnownNetwork {
+  String ssid;
+  String password;
+};
 
-//  ---------- CHANGE THESE CONSTANTS ----------
-/** 
- *  The endpoint returning MD5 of the image. 
- *  Example: "http://yourdomain.com/ANATOLIY_MEME_ID"
- */
+KnownNetwork knownNetworks[] = {
+  // { "wespennest", "Osichky!" },
+  { "Egor", "internet2" },
+  { "Vodafone-govno", "Universal1" },
+  { "FRITZ!Box 7530 DL", "27444065370300070084" },
+};
+const int knownNetworksCount = sizeof(knownNetworks) / sizeof(knownNetworks[0]);
+
+// A vector of *additional* networks loaded from ANATOLIY_WIFI_BOOK
+std::vector<KnownNetwork> dynamicNetworks;
+
+// -----------------------------------------------------
+// Endpoints
 const char *ANATOLIY_MEME_ID = "https://anatoliy.i-am-hellguz.uk/get_last_md5";
-
-/** 
- *  The endpoint returning the XBM image text.
- *  Example: "http://yourdomain.com/ANATOLIY_MEME_POCKET"
- */
 const char *ANATOLIY_MEME_POCKET = "https://anatoliy.i-am-hellguz.uk/get_last_xbm";
+const char *ANATOLIY_WIFI_BOOK = "https://anatoliy.i-am-hellguz.uk/get_wifi_book";
 
-/** 
- * Frequency to check for changes (in milliseconds).
- * Example: 300000 ms = 5 minutes 
- */
-const unsigned long CHECK_FREQUENCY_MS = 1 * 10 * 1000;
-//  --------------------------------------------
+// Timing
+const unsigned long CHECK_FREQUENCY_MS = 10 * 1000;  // For MD5 check
+const unsigned long WIFI_RESCAN_MS = 30 * 1000;      // For Wi-Fi re-scan if disconnected
+const unsigned long WIFI_BOOK_MS = 30 * 1000;        // How often to fetch new Wi-Fi Book
 
+// E-Paper, Web server, Preferences
 Preferences prefs;
-
-
-HT_ICMEN2R13EFC1 display(6, 5, 4, 7, 3, 2, -1, 6000000);  // rst,dc,cs,busy,sck,mosi,miso,frequency
-
-int width, height;
-String HTTP_Payload;
+HT_ICMEN2R13EFC1 display(6, 5, 4, 7, 3, 2, -1, 6000000);
 WebServer server(80);
-const char *ssid = "wespennest";
-const char *password = "Osichky!";
 
-// Keep track of the last known MD5 from the server
+// State variables
 String lastKnownMD5 = "";
-
-// Timestamp to decide when to check again
 unsigned long lastCheckMillis = 0;
+unsigned long lastWifiCheckMillis = 0;  // For repeated scans
+unsigned long lastBookMillis = 0;       // For repeated Wi-Fi book fetch
 
 // Forward declarations
+void connectToWiFi();
+bool tryConnect(const char *ssid, const char *password);
 void drawImageDemo();
 void downloadAndDisplayImage();
 String getServerMD5();
-int parseXBM(const String &xbmData, uint8_t *dest, size_t destSize);
+int parseWifiBook(const String &jsonData);
+void updateWifiBook();                      // <--- NEW
+void loadWifiBookFromPrefs();               // <--- NEW
+void saveWifiBookToPrefs(const String &s);  // <--- NEW
 
 // -----------------------------------------------------
-// This callback handles the old "/set" endpoint from your code
-// (unchanged from your example but kept here for reference).
+// Callback for "/set" endpoint (original code).
 // -----------------------------------------------------
 void Config_Callback() {
   String Payload = server.arg("value");
@@ -79,60 +86,357 @@ void setup() {
   Serial.begin(115200);
   Serial.println();
 
-  // Initialize Preferences w/ a namespace
+  // Set Wi-Fi to Station Mode
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);  // Disconnect from any previous connections
+
+  // Initialize Preferences with a namespace
   prefs.begin("my-namespace", false);
 
-  // Retrieve saved MD5 (default to "" if none)
+  // Retrieve saved MD5
   lastKnownMD5 = prefs.getString("lastMD5", "");
+
+  // Load any previously saved Wi-Fi Book
+  loadWifiBookFromPrefs();
 
   VextON();
   delay(100);
   display.init();
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("Connected");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP());
+  // Attempt Wi-Fi connection at startup
+  connectToWiFi();
 
-  // Web server routes
+  // Start web server
   server.on("/", []() {
     server.send(200, "text/html", index_html);
   });
-
   server.on("/set", HTTP_GET, Config_Callback);
   server.begin();
 }
 
 // -----------------------------------------------------
-// Downloads the XBM data from ANATOLIY_MEME_POCKET,
-// parses it into WiFi_Logo_bits[], and calls drawImageDemo().
+void loop() {
+  server.handleClient();
+
+  unsigned long now = millis();
+
+  // 1) If we're disconnected, re-scan every WIFI_RESCAN_MS
+  if (WiFi.status() != WL_CONNECTED) {
+    if (now - lastWifiCheckMillis >= WIFI_RESCAN_MS) {
+      lastWifiCheckMillis = now;
+      Serial.println("Wi-Fi is disconnected. Trying to reconnect...");
+      // Set Wi-Fi to Station Mode
+
+      connectToWiFi();
+    }
+  }
+
+  // 2) Check the Wi-Fi book every WIFI_BOOK_MS if we're connected
+  if (WiFi.status() == WL_CONNECTED) {
+    if (now - lastBookMillis >= WIFI_BOOK_MS) {
+      lastBookMillis = now;
+      updateWifiBook();
+    }
+  }
+
+  // 3) Check for new MD5 updates every CHECK_FREQUENCY_MS
+  if (now - lastCheckMillis >= CHECK_FREQUENCY_MS) {
+    lastCheckMillis = now;
+    String currentMD5 = getServerMD5();
+    if (currentMD5 != lastKnownMD5 && currentMD5.length() > 0) {
+      Serial.println("Image MD5 changed => Download new image.");
+      downloadAndDisplayImage();
+      lastKnownMD5 = currentMD5;
+      prefs.putString("lastMD5", lastKnownMD5);
+    } else {
+      Serial.println("Image MD5 unchanged, or no Wi-Fi, do nothing.");
+    }
+  }
+}
+
+// -----------------------------------------------------
+// Connect to WiFi:
+//  1) Try last successful SSID
+//  2) Combine knownNetworks + dynamicNetworks
+//  3) Do a Wi-Fi scan, see if any appear, try them
+// -----------------------------------------------------
+void connectToWiFi() {
+  String lastSSID = prefs.getString("lastSSID", "");
+  bool foundLast = false;
+
+  // Step A: Attempt last successful SSID first
+  if (lastSSID.length() > 0) {
+    // Check in dynamicNetworks first (reverse order)
+    for (int i = dynamicNetworks.size() - 1; i >= 0; i--) {
+      if (lastSSID == dynamicNetworks[i].ssid) {
+        foundLast = true;
+        Serial.print("Trying last known network (dynamic): ");
+        Serial.println(lastSSID);
+        if (tryConnect(dynamicNetworks[i].ssid.c_str(), dynamicNetworks[i].password.c_str())) {
+          Serial.println("Connected to last known dynamic network!");
+          return;
+        }
+        break;  // Stop after trying the last known network in dynamic list
+      }
+    }
+
+    // If not found or failed, check in knownNetworks
+    if (!foundLast) {
+      for (int i = 0; i < knownNetworksCount; i++) {
+        if (lastSSID == knownNetworks[i].ssid) {
+          foundLast = true;
+          Serial.print("Trying last known network: ");
+          Serial.println(lastSSID);
+          if (tryConnect(knownNetworks[i].ssid.c_str(), knownNetworks[i].password.c_str())) {
+            Serial.println("Connected to last known network!");
+            return;
+          }
+          break;  // Stop after trying the last known network in knownNetworks
+        }
+      }
+    }
+  }
+
+  // Step B: If last successful SSID fails, scan all networks
+  Serial.println("Forcibly disconnecting any Wi-Fi connection...");
+  WiFi.disconnect(true);  // Force disconnect
+  delay(1000);            // Brief pause before scanning
+
+  Serial.println("Scanning for Wi-Fi networks...");
+  int numNetworks = WiFi.scanNetworks();
+  Serial.print("Found ");
+  Serial.print(numNetworks);
+  Serial.println(" networks");
+
+  // Check dynamicNetworks first (reverse order)
+  for (int i = dynamicNetworks.size() - 1; i >= 0; i--) {
+    for (int j = 0; j < numNetworks; j++) {
+      String foundSSID = WiFi.SSID(j);
+      if (foundSSID == dynamicNetworks[i].ssid) {
+        Serial.print("Trying dynamic network: ");
+        Serial.println(foundSSID);
+        if (tryConnect(dynamicNetworks[i].ssid.c_str(), dynamicNetworks[i].password.c_str())) {
+          Serial.print("Connected to: ");
+          Serial.println(foundSSID);
+          prefs.putString("lastSSID", foundSSID);  // Store as last successful
+          return;                                  // success
+        }
+      }
+    }
+  }
+
+  // Then check knownNetworks
+  for (int i = 0; i < knownNetworksCount; i++) {
+    for (int j = 0; j < numNetworks; j++) {
+      String foundSSID = WiFi.SSID(j);
+      if (foundSSID == knownNetworks[i].ssid) {
+        Serial.print("Trying known network: ");
+        Serial.println(foundSSID);
+        if (tryConnect(knownNetworks[i].ssid.c_str(), knownNetworks[i].password.c_str())) {
+          Serial.print("Connected to: ");
+          Serial.println(foundSSID);
+          prefs.putString("lastSSID", foundSSID);  // Store as last successful
+          return;                                  // success
+        }
+      }
+    }
+  }
+
+  Serial.println("Could not connect to any known network.");
+}
+
+// -----------------------------------------------------
+// Attempt to connect to a given SSID/pwd with a short timeout
+// Return true if connected, false otherwise
+// -----------------------------------------------------
+bool tryConnect(const char *ssid, const char *password) {
+  WiFi.disconnect();  // ensure fresh
+  WiFi.begin(ssid, password);
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 5000) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("Connected! IP: ");
+    Serial.println(WiFi.localIP());
+    delay(250);
+    return true;
+  }
+  return false;
+}
+
+// -----------------------------------------------------
+// Parses the Wi-Fi Book JSON data and populates dynamicNetworks
+// Expects JSON format: [{"ssid":"Egor","password":"internet2"},...]
+// Returns the number of networks parsed
+// -----------------------------------------------------
+int parseWifiBook(const String &jsonData) {
+  dynamicNetworks.clear();  // Clear existing dynamic networks
+  int networksParsed = 0;
+
+  int len = jsonData.length();
+  if (len < 2 || jsonData[0] != '[' || jsonData[len - 1] != ']') {
+    Serial.println("parseWifiBook: Invalid JSON format.");
+    return networksParsed;
+  }
+
+  // Remove the surrounding square brackets
+  String innerJson = jsonData.substring(1, len - 1);
+  int pos = 0;
+  while (pos < innerJson.length()) {
+    // Find the start of the next object
+    int objStart = innerJson.indexOf('{', pos);
+    if (objStart == -1) break;
+
+    // Find the end of the object
+    int objEnd = innerJson.indexOf('}', objStart);
+    if (objEnd == -1) break;
+
+    // Extract the object string
+    String objStr = innerJson.substring(objStart + 1, objEnd);
+
+    // Parse "ssid" and "password"
+    String ssid = "";
+    String password = "";
+
+    // Find "ssid":"value"
+    int ssidKey = objStr.indexOf("\"ssid\"");
+    if (ssidKey != -1) {
+      int ssidColon = objStr.indexOf(':', ssidKey);
+      if (ssidColon != -1) {
+        int ssidStartQuote = objStr.indexOf('"', ssidColon);
+        int ssidEndQuote = objStr.indexOf('"', ssidStartQuote + 1);
+        if (ssidStartQuote != -1 && ssidEndQuote != -1) {
+          ssid = objStr.substring(ssidStartQuote + 1, ssidEndQuote);
+        }
+      }
+    }
+
+    // Find "password":"value"
+    int passKey = objStr.indexOf("\"password\"");
+    if (passKey != -1) {
+      int passColon = objStr.indexOf(':', passKey);
+      if (passColon != -1) {
+        int passStartQuote = objStr.indexOf('"', passColon);
+        int passEndQuote = objStr.indexOf('"', passStartQuote + 1);
+        if (passStartQuote != -1 && passEndQuote != -1) {
+          password = objStr.substring(passStartQuote + 1, passEndQuote);
+        }
+      }
+    }
+
+    // If both ssid and password are found, add to dynamicNetworks
+    if (ssid.length() > 0 && password.length() > 0) {
+      dynamicNetworks.push_back({ ssid, password });
+      networksParsed++;
+      Serial.print("Parsed network: ");
+      Serial.print(ssid);
+      Serial.print(" / ");
+      Serial.println(password);
+    }
+
+    // Move position past this object
+    pos = objEnd + 1;
+  }
+
+  return networksParsed;
+}
+
+// -----------------------------------------------------
+// Call ANATOLIY_WIFI_BOOK, parse JSON, store in dynamicNetworks
+// and persist in Preferences. (Called every 30 secs if Wi-Fi ok.)
+// -----------------------------------------------------
+void updateWifiBook() {
+  Serial.println("Fetching Wi-Fi book...");
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Wi-Fi not connected, skipping Wi-Fi book fetch...");
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(ANATOLIY_WIFI_BOOK);
+  int httpCode = http.GET();
+  if (httpCode == 200) {
+    String payload = http.getString();
+    Serial.println("Wi-Fi book fetched, storing...");
+
+    // Parse the JSON manually
+    int parsedNetworks = parseWifiBook(payload);
+    if (parsedNetworks > 0) {
+      Serial.print("Successfully parsed ");
+      Serial.print(parsedNetworks);
+      Serial.println(" networks from Wi-Fi book.");
+      // Save the raw JSON to Preferences so we can reload it on next boot
+      saveWifiBookToPrefs(payload);
+    } else {
+      Serial.println("No networks parsed from Wi-Fi book.");
+    }
+
+  } else {
+    Serial.print("Failed to fetch Wi-Fi book. HTTP code: ");
+    Serial.println(httpCode);
+  }
+  http.end();
+}
+
+// -----------------------------------------------------
+// Save the JSON string to Preferences
+// -----------------------------------------------------
+void saveWifiBookToPrefs(const String &s) {
+  prefs.putString("wifiBook", s);
+  Serial.println("Wi-Fi book saved to Preferences.");
+}
+
+// -----------------------------------------------------
+// Load the JSON from Preferences into dynamicNetworks
+// on startup
+// -----------------------------------------------------
+void loadWifiBookFromPrefs() {
+  String book = prefs.getString("wifiBook", "");
+  if (book.length() == 0) {
+    Serial.println("No saved Wi-Fi book found in prefs.");
+    return;
+  }
+
+  Serial.println("Loading Wi-Fi book from Preferences...");
+  int parsedNetworks = parseWifiBook(book);
+  if (parsedNetworks > 0) {
+    Serial.print("Successfully loaded ");
+    Serial.print(parsedNetworks);
+    Serial.println(" networks from Preferences.");
+  } else {
+    Serial.println("Failed to parse Wi-Fi book from Preferences.");
+  }
+}
+
+// -----------------------------------------------------
+// Downloads the XBM data, parses it, calls drawImageDemo().
 // -----------------------------------------------------
 void downloadAndDisplayImage() {
   Serial.println("\nDownloading updated XBM image...");
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, skipping download...");
+    return;
+  }
 
   HTTPClient http;
   http.begin(ANATOLIY_MEME_POCKET);
   int httpCode = http.GET();
 
   if (httpCode == 200) {
-    // Read the entire XBM text payload into a String
     String xbmData = http.getString();
     Serial.println("XBM data downloaded. Parsing...");
 
-    // Attempt to parse the XBM text into WiFi_Logo_bits[]
     int bytesParsed = parseXBM(xbmData, WiFi_Logo_bits, sizeof(WiFi_Logo_bits));
-
     if (bytesParsed > 0) {
       Serial.print("Successfully parsed XBM data. Bytes parsed: ");
       Serial.println(bytesParsed);
-
-      // Now draw it
       drawImageDemo();
     } else {
       Serial.println("Failed to parse XBM data (or no data).");
@@ -148,41 +452,32 @@ void downloadAndDisplayImage() {
 // Gets the current MD5 from your server
 // -----------------------------------------------------
 String getServerMD5() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, skipping MD5 request...");
+    return "";
+  }
+
   HTTPClient http;
   http.begin(ANATOLIY_MEME_ID);
   int httpCode = http.GET();
   if (httpCode == 200) {
     String serverMD5 = http.getString();
-    serverMD5.trim();  // remove extra whitespace/newline
+    serverMD5.trim();
+    Serial.print("Server MD5: ");
+    Serial.println(serverMD5);
     return serverMD5;
   } else {
-    Serial.println("Failed to get MD5 from server.");
+    Serial.print("Failed to get MD5 from server. HTTP code: ");
+    Serial.println(httpCode);
     http.end();
     return "";
   }
 }
 
 // -----------------------------------------------------
-// Parses XBM-formatted text into a raw byte array (dest).
-// This is a simple parser that looks for comma-separated
-// hex values of the form 0x?? in curly braces.
+// Basic XBM parsing - extracts 0x?? bytes from {...} region
 // -----------------------------------------------------
 int parseXBM(const String &xbmData, uint8_t *dest, size_t destSize) {
-  // Example XBM snippet might look like:
-  //
-  //    #define test_width 250
-  //    #define test_height 122
-  //    static unsigned char test_bits[] = {
-  //    0x00, 0xff, 0x1c, ... 0xC2
-  //    };
-  //
-  // We'll:
-  //   1) Find the '{' and '}'
-  //   2) Extract all "0x??" tokens (comma-separated)
-  //   3) Convert them to integers
-  //   4) Store in dest[]
-
-  // 1) Find the curly brace region
   int startIndex = xbmData.indexOf('{');
   int endIndex = xbmData.indexOf('}');
   if (startIndex < 0 || endIndex < 0 || endIndex <= startIndex) {
@@ -190,30 +485,23 @@ int parseXBM(const String &xbmData, uint8_t *dest, size_t destSize) {
     return 0;
   }
 
-  // We'll extract the substring containing just the hex array
   String hexArray = xbmData.substring(startIndex + 1, endIndex);
 
-  // Now split by commas
   int byteCount = 0;
   int searchFrom = 0;
   while (true) {
-    // Find a comma or the end of string
     int commaIndex = hexArray.indexOf(',', searchFrom);
     String token;
     if (commaIndex == -1) {
-      // no more commas
       token = hexArray.substring(searchFrom);
     } else {
       token = hexArray.substring(searchFrom, commaIndex);
     }
-    token.trim();  // remove extra whitespace
+    token.trim();
 
-    // Convert something like "0x1C" into an integer
     if (token.startsWith("0x") || token.startsWith("0X")) {
-      // parseInt can handle hex if we skip "0x" and pass HEX
-      String hexStr = token.substring(2);  // skip "0x"
+      String hexStr = token.substring(2);
       int val = (int)strtol(hexStr.c_str(), NULL, 16);
-
       if (byteCount < (int)destSize) {
         dest[byteCount++] = (uint8_t)val;
       } else {
@@ -223,71 +511,33 @@ int parseXBM(const String &xbmData, uint8_t *dest, size_t destSize) {
     }
 
     if (commaIndex == -1) {
-      // We reached the last token
       break;
     }
-    searchFrom = commaIndex + 1;  // move past the comma
+    searchFrom = commaIndex + 1;
   }
 
   return byteCount;
 }
 
 // -----------------------------------------------------
-// The function that draws the content of WiFi_Logo_bits[]
-// to the screen.
+// Draw the content of WiFi_Logo_bits[] on the e-paper
 // -----------------------------------------------------
 void drawImageDemo() {
-  // Clear the internal buffer (RAM), not the screen yet
-  display.clear();
-
-  // Draw XBM in the internal buffer
+  display.clear();  // Clear internal buffer
   display.drawXbm(0, 0, WiFi_Logo_width, WiFi_Logo_height, WiFi_Logo_bits);
-
-  // Force a single full refresh
   display.update(BLACK_BUFFER);
-
-  // Some Heltec libraries require display.display() after update; others do not
   display.display();
-
-  // Optional small delay
-  delay(1000);
+  delay(1000);  // let it settle
 }
 
 // -----------------------------------------------------
-void VextON(void) {
+void VextON() {
   pinMode(45, OUTPUT);
   digitalWrite(45, LOW);
 }
 
 // -----------------------------------------------------
-void VextOFF(void)  // Vext default OFF
-{
+void VextOFF() {
   pinMode(45, OUTPUT);
   digitalWrite(45, HIGH);
-}
-
-// -----------------------------------------------------
-// Main loop checks for new server requests (for the built-in
-// web server) and also periodically checks if the image changed.
-// -----------------------------------------------------
-void loop() {
-  server.handleClient();  // Handle requests from clients
-
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastCheckMillis >= CHECK_FREQUENCY_MS) {
-    lastCheckMillis = currentMillis;
-
-    // 1) Ask the server for the current MD5
-    String currentMD5 = getServerMD5();  // the new MD5 from server
-    if (currentMD5 != lastKnownMD5) {
-      Serial.println("Image MD5 changed => Download new image.");
-      downloadAndDisplayImage();
-
-      // Save the new MD5 in NVS
-      lastKnownMD5 = currentMD5;
-      prefs.putString("lastMD5", lastKnownMD5);
-    } else {
-      Serial.println("Image MD5 unchanged, do nothing.");
-    }
-  }
 }
