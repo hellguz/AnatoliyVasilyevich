@@ -48,6 +48,8 @@ UPDATE_TEXT = os.getenv("UPDATE_TEXT", "A new image has been uploaded!")
 WIFI_CONNECT_TEXT = os.getenv(
     "WIFI_CONNECT_TEXT", "Thank you for sharing your network!"
 )
+# Load environment variables
+ABOUT_TEXT = os.getenv("ABOUT_TEXT")
 
 # Enable logging
 logging.basicConfig(
@@ -105,8 +107,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Prompt user whether to notify everyone
     keyboard = [
         [
-            InlineKeyboardButton("Yes", callback_data="notify_yes"),
-            InlineKeyboardButton("No", callback_data="notify_no"),
+            InlineKeyboardButton("Давай", callback_data="notify_yes"),
+            InlineKeyboardButton("Ну не", callback_data="notify_no"),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -414,31 +416,28 @@ async def handle_wifi_password(
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the main menu with available actions using ReplyKeyboardMarkup."""
     keyboard = [
-        [KeyboardButton("Загрузить мем"), KeyboardButton("Добавить Wi-Fi")]
+        [KeyboardButton("Загрузить мем"), KeyboardButton("Добавить Wi-Fi")],
+        [KeyboardButton("Об Анатолии Васильевиче")]
     ]
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard,
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
-    
-    # if update.callback_query:
-    #     await update.callback_query.message.reply_text(
-    #         "Choose an action:", reply_markup=reply_markup
-    #     )
-    # else:
-    #     await update.message.reply_text(
-    #         "Choose an action:", reply_markup=reply_markup
-    #     )
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
+
         
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a message when the command /help is issued."""
+    await update.message.reply_text(ABOUT_TEXT)
+
+
 async def handle_main_menu_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle user selections from the main menu."""
     user_selection = update.message.text.lower()
 
-    if user_selection == "upload image":
+    if user_selection == "загрузить мем":
         await update.message.reply_text("Просто загрузи картинку как ты обычно делаешь в Телеграме.")
-    elif user_selection == "share wifi":
+    elif user_selection == "добавить wi-fi":
         await share_wifi(update, context)
+    elif user_selection == "об анатолии васильевиче":
+        await help_command(update, context)
     else:
         await update.message.reply_text(
             "Не понял, попробуй еще раз."
@@ -494,6 +493,8 @@ async def on_startup() -> None:
     # Add CallbackQueryHandler for other buttons
     application.add_handler(CallbackQueryHandler(button_handler, pattern="^(?!share_wifi).*"))  # Exclude 'share_wifi' to avoid conflict
     
+    application.add_handler(CommandHandler("help", help_command))
+
     # Add the generic MessageHandler last
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_main_menu_selection))
     
