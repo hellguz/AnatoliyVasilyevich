@@ -1,6 +1,7 @@
 python-telegram-bot
 starlette
 uvicorn
+gunicorn[uvicorn]
 python-dotenv
 serial
 pillow

@@ -34,6 +34,11 @@ from telegram.ext import (
 
 WIFI_NAME, WIFI_PASSWORD = range(2)
 
+# Global cache for last image MD5
+last_md5_file = None
+last_md5 = None
+
+
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -308,8 +313,11 @@ def generate_xbm_string(img: Image.Image) -> str:
 
 async def get_last_md5(request: Request) -> JSONResponse:
     """
-    Return the MD5 hash of the latest uploaded image file.
+    Return the MD5 hash of the latest uploaded image file, using a simple cache
+    to avoid recalculating if the file is unchanged.
     """
+    global last_md5_file, last_md5
+
     try:
         # Get the list of image files, sorted by modification time (newest first)
         image_files = sorted(
@@ -321,20 +329,28 @@ async def get_last_md5(request: Request) -> JSONResponse:
             key=os.path.getmtime,
             reverse=True,
         )
+
         if not image_files:
             return JSONResponse({"error": "No images found."}, status_code=404)
 
         latest_image_path = image_files[0]
 
-        # Compute the MD5 hash of the file
-        with open(latest_image_path, "rb") as file:
-            file_hash = hashlib.md5(file.read()).hexdigest()
+        # Check if this is the same file as last time
+        if latest_image_path == last_md5_file:
+            # Return the cached MD5
+            return Response(last_md5)
+        else:
+            # Compute new MD5, update cache
+            with open(latest_image_path, "rb") as file:
+                new_md5 = hashlib.md5(file.read()).hexdigest()
 
-        return Response(file_hash)
+            last_md5_file = latest_image_path
+            last_md5 = new_md5
+            return Response(new_md5)
+
     except Exception as e:
         logger.error(f"Error calculating MD5 hash: {e}")
         return JSONResponse({"error": "Internal server error."}, status_code=500)
-
 
 async def get_wifi_book(request: Request) -> JSONResponse:
     """
