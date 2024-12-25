@@ -9,18 +9,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, PlainTextResponse
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import io
 import hashlib
-from telegram import InlineKeyboardMarkup, KeyboardButton, Update, InlineKeyboardButton, ReplyKeyboardMarkup 
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes,
-    ConversationHandler,
+from telegram import (
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Update,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
 )
 from telegram.ext import (
     Application,
@@ -38,7 +35,6 @@ WIFI_NAME, WIFI_PASSWORD = range(2)
 last_md5_file = None
 last_md5 = None
 
-
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -46,14 +42,9 @@ DOMAIN_NAME = os.getenv("DOMAIN_NAME")
 
 # Texts from .env
 WELCOME_TEXT = os.getenv("WELCOME_TEXT", "Welcome! Your user ID has been registered.")
-NOTIFY_PROMPT = os.getenv(
-    "NOTIFY_PROMPT", "Do you want to notify all users about this upload?"
-)
+NOTIFY_PROMPT = os.getenv("NOTIFY_PROMPT", "Do you want to notify all users about this upload?")
 UPDATE_TEXT = os.getenv("UPDATE_TEXT", "A new image has been uploaded!")
-WIFI_CONNECT_TEXT = os.getenv(
-    "WIFI_CONNECT_TEXT", "Thank you for sharing your network!"
-)
-# Load environment variables
+WIFI_CONNECT_TEXT = os.getenv("WIFI_CONNECT_TEXT", "Thank you for sharing your network!")
 ABOUT_TEXT = os.getenv("ABOUT_TEXT")
 
 # Enable logging
@@ -145,9 +136,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif query.data == "notify_no":
         # Delete the original message with buttons
         await query.message.delete()
-        # await query.message.reply_text("Okay, I won't notify anyone.")
+        # Optionally respond with a "not notified" text
 
-    # Removed the 'share_wifi' handling from here to let ConversationHandler manage it
+    # (share_wifi is handled by the ConversationHandler)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -179,7 +170,6 @@ def get_all_user_ids() -> list:
 
 async def telegram_webhook(request: Request) -> PlainTextResponse:
     """Webhook endpoint for Telegram updates."""
-    # Log incoming request for debugging
     try:
         data = await request.json()
         logger.debug(f"Incoming update: {data}")
@@ -187,16 +177,79 @@ async def telegram_webhook(request: Request) -> PlainTextResponse:
         logger.error(f"Failed to parse incoming update: {e}")
         return PlainTextResponse("Error parsing JSON", status_code=400)
 
-    # Process the update
     update = Update.de_json(data, application.bot)
     await application.process_update(update)
     return PlainTextResponse("OK")
 
 
+#
+# 1. Helper function: parse the username from the filename
+#
+def parse_username_from_filename(image_path: str) -> str:
+    """
+    Example: "23-09-26-10-15-45-someUser-FunnyCaption.jpg"
+    splits = ["23", "09", "26", "10", "15", "45", "someUser", "FunnyCaption.jpg"]
+    We'll assume index 6 is the username in that scenario.
+
+    If your format is strictly: yymmdd-hhmmss-username-caption.jpg
+    then splitted[1] is the username. Adjust accordingly if needed.
+    """
+    filename = os.path.basename(image_path)
+    splitted = filename.split("-")
+
+    # Adjust based on how many dashes you have in your filename
+    # If your format is: f"{now_str}-{username_str}-{sanitized_caption}.jpg"
+    # then splitted = [ 'yy-mm-dd-hh-mm-ss', 'username', 'caption.jpg' ]
+    # splitted[1] should be the username
+    if len(splitted) > 1:
+        return splitted[6]
+    else:
+        return "UnknownUser"
+
+
+#
+# Draw the username in the lower-left corner with a black box behind it
+#
+def draw_username(img: Image.Image, username: str) -> None:
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    # Fallback approach: use getmask() -> getbbox()
+    mask = font.getmask(username)
+    bbox = mask.getbbox()  # (x0, y0, x1, y1)
+
+    if bbox:
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+    else:
+        # In case getbbox() returns None, fallback to something small
+        text_width, text_height = (0, 0)
+
+    # Position the text in the lower-left corner
+    # 2 pixels from the left and 2 pixels from the bottom
+    x = 2
+    y = img.height - text_height - 2
+
+    # Draw a black rectangle to serve as background for the white text
+    # Expand it by 1 pixel on all sides if you want some padding around the text
+    rect_x1 = x - 1
+    rect_y1 = y - 1
+    rect_x2 = x + text_width + 1
+    rect_y2 = y + text_height + 1
+
+    draw.rectangle((rect_x1, rect_y1, rect_x2, rect_y2), fill=1)
+
+    # Now draw the white text on top
+    draw.text((x, y), username, fill=0, font=font)
+
+
+#
+# 3. The /get_last_img route
+#
 async def get_last_img(request: Request) -> Response:
-    """Serve the latest uploaded image."""
+    """Serve the latest uploaded image as a 256x122 black & white JPEG, watermarked."""
     try:
-        # Get list of image files sorted by modification time in descending order
+        # Sort by modification time (newest first)
         image_files = sorted(
             (
                 os.path.join(IMAGE_DIR, f)
@@ -206,38 +259,49 @@ async def get_last_img(request: Request) -> Response:
             key=os.path.getmtime,
             reverse=True,
         )
-        if image_files:
-            latest_image_path = image_files[0]
 
-            # Open with Pillow
-            img = Image.open(latest_image_path)
-
-            # Resize to 256x122 (unproportional)
-            img = img.resize((256, 122), Image.Resampling.NEAREST)
-
-            # Convert to pure black & white (1-bit), no grayscale
-            img = img.convert("1", dither=Image.Dither.NONE)
-
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format="JPEG")
-            img_byte_arr.seek(0)
-            return Response(content=img_byte_arr.read(), media_type="image/jpeg")
-        else:
+        if not image_files:
             return JSONResponse({"error": "No images found."}, status_code=404)
+
+        latest_image_path = image_files[0]
+        username = parse_username_from_filename(latest_image_path)
+
+        # Open with Pillow
+        img = Image.open(latest_image_path)
+
+        # Resize to 256x122 (unproportional)
+        img = img.resize((256, 122), Image.Resampling.NEAREST)
+
+        # Convert to 1-bit black & white
+        img = img.convert("1", dither=Image.Dither.NONE)
+
+        # Draw username in the lower-right corner
+        draw_username(img, username)
+
+        # Return as JPEG
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format="JPEG")
+        img_byte_arr.seek(0)
+
+        return Response(content=img_byte_arr.read(), media_type="image/jpeg")
     except Exception as e:
         logger.error(f"Error serving the latest image: {e}")
         return JSONResponse({"error": "Internal server error."}, status_code=500)
 
 
+#
+# 4. The /get_last_xbm route
+#
 async def get_last_xbm(request: Request) -> Response:
     """
     Return the latest uploaded image as an XBM text, after:
       1) Resizing (unproportionally) to 256x122
       2) Converting to pure black & white (no grayscale)
-      3) Generating a valid XBM string
+      3) Watermarking with the username
+      4) Generating a valid XBM string
     """
     try:
-        # Get list of .jpg files, newest first
+        # Sort by modification time (newest first)
         image_files = sorted(
             (
                 os.path.join(IMAGE_DIR, f)
@@ -251,6 +315,7 @@ async def get_last_xbm(request: Request) -> Response:
             return JSONResponse({"error": "No images found."}, status_code=404)
 
         latest_image_path = image_files[0]
+        username = parse_username_from_filename(latest_image_path)
 
         # Open with Pillow
         img = Image.open(latest_image_path)
@@ -258,10 +323,13 @@ async def get_last_xbm(request: Request) -> Response:
         # Resize to 256x122 (unproportional)
         img = img.resize((256, 122), Image.Resampling.NEAREST)
 
-        # Convert to pure black & white (1-bit), no grayscale
+        # Convert to pure 1-bit black & white
         img = img.convert("1", dither=Image.Dither.NONE)
 
-        # Build an XBM string manually
+        # Watermark
+        draw_username(img, username)
+
+        # Build XBM string
         xbm_str = generate_xbm_string(img)
 
         # Return as text
@@ -284,8 +352,8 @@ def generate_xbm_string(img: Image.Image) -> str:
     byte_val = 0
     bit_index = 0
 
-    # Pillow '1' mode => 0=Black, 255=White
-    # Define 'black' as bit=1, 'white' as bit=0
+    # PIL '1' mode => 0 = Black, 255 = White
+    # We'll define 'black' => bit=1, 'white' => bit=0 to match typical XBM usage
     for y in range(height):
         for x in range(width):
             pixel_value = pixels[x, y]  # 0 or 255
@@ -297,11 +365,11 @@ def generate_xbm_string(img: Image.Image) -> str:
                 byte_val = 0
                 bit_index = 0
 
-    # If width*height is not a multiple of 8, flush the last partial byte
+    # Flush any partial byte
     if bit_index > 0:
         xbm_data.append(f"0x{byte_val:02x}")
 
-    # Build the final text output
+    # Build final text output
     xbm_str = f"#define wifi_width {width}\n"
     xbm_str += f"#define wifi_height {height}\n"
     xbm_str += "static const unsigned char wifi_bits[] = {\n  "
@@ -317,9 +385,7 @@ async def get_last_md5(request: Request) -> JSONResponse:
     to avoid recalculating if the file is unchanged.
     """
     global last_md5_file, last_md5
-
     try:
-        # Get the list of image files, sorted by modification time (newest first)
         image_files = sorted(
             (
                 os.path.join(IMAGE_DIR, f)
@@ -334,8 +400,6 @@ async def get_last_md5(request: Request) -> JSONResponse:
             return JSONResponse({"error": "No images found."}, status_code=404)
 
         latest_image_path = image_files[0]
-
-        # Check if this is the same file as last time
         if latest_image_path == last_md5_file:
             # Return the cached MD5
             return Response(last_md5)
@@ -343,19 +407,16 @@ async def get_last_md5(request: Request) -> JSONResponse:
             # Compute new MD5, update cache
             with open(latest_image_path, "rb") as file:
                 new_md5 = hashlib.md5(file.read()).hexdigest()
-
             last_md5_file = latest_image_path
             last_md5 = new_md5
             return Response(new_md5)
-
     except Exception as e:
         logger.error(f"Error calculating MD5 hash: {e}")
         return JSONResponse({"error": "Internal server error."}, status_code=500)
 
+
 async def get_wifi_book(request: Request) -> JSONResponse:
-    """
-    Serve the networks.json file as a JSON response.
-    """
+    """Serve the networks.json file as a JSON response."""
     try:
         if os.path.exists(NETWORKS_FILE):
             with open(NETWORKS_FILE, "r") as file:
@@ -366,6 +427,7 @@ async def get_wifi_book(request: Request) -> JSONResponse:
     except Exception as e:
         logger.error(f"Error serving Wi-Fi book: {e}")
         return JSONResponse({"error": "Internal server error."}, status_code=500)
+
 
 async def share_wifi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Initiate the process of sharing WiFi."""
@@ -398,7 +460,6 @@ async def handle_wifi_password(
         await update.message.reply_text("Произошла ошибка. Пожалуйста, начните снова.")
         return ConversationHandler.END
 
-    # Save the WiFi network to networks.json
     try:
         if os.path.exists(NETWORKS_FILE):
             with open(NETWORKS_FILE, "r") as file:
@@ -413,16 +474,12 @@ async def handle_wifi_password(
         with open(NETWORKS_FILE, "w") as file:
             json.dump(networks, file, indent=4)
 
-        # Respond to the user
         await update.message.reply_text(
             f"WiFi '{wifi_name}' успешно добавлен.\n\n{WIFI_CONNECT_TEXT}"
         )
-
     except Exception as e:
         logger.error(f"Failed to save WiFi network: {e}")
-        await update.message.reply_text(
-            "Произошла ошибка при сохранении WiFi. Попробуйте ещё раз."
-        )
+        await update.message.reply_text("Произошла ошибка при сохранении WiFi. Попробуйте ещё раз.")
 
     # Show the main menu again after completion
     await show_main_menu(update, context)
@@ -433,12 +490,12 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Show the main menu with available actions using ReplyKeyboardMarkup."""
     keyboard = [
         [KeyboardButton("Загрузить мем"), KeyboardButton("Добавить Wi-Fi")],
-        [KeyboardButton("Об Анатолии Васильевиче")]
+        [KeyboardButton("Об Анатолии Васильевиче")],
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
 
-        
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
     await update.message.reply_text(ABOUT_TEXT)
@@ -455,12 +512,9 @@ async def handle_main_menu_selection(update: Update, context: ContextTypes.DEFAU
     elif user_selection == "об анатолии васильевиче":
         await help_command(update, context)
     # else:
-    #     await update.message.reply_text(
-    #         "Не понял, попробуй еще раз."
-    #     )
+    #     await update.message.reply_text("Не понял, попробуй еще раз.")
 
 
-# Define the routes for the Starlette application
 routes = [
     Route("/telegram", endpoint=telegram_webhook, methods=["POST"]),
     Route("/get_last_img", endpoint=get_last_img, methods=["GET"]),
@@ -469,58 +523,42 @@ routes = [
     Route("/get_wifi_book", endpoint=get_wifi_book, methods=["GET"]),
 ]
 
-# Initialize the Starlette application
 app = Starlette(routes=routes)
 
 
 async def on_startup() -> None:
     """Configure handlers and set webhook on startup."""
-    
-    # 1) Add all your handlers
-
-    # Add the ConversationHandler first to give it higher priority
     wifi_conversation_handler = ConversationHandler(
         entry_points=[
             CommandHandler("share_wifi", share_wifi),
             CallbackQueryHandler(share_wifi, pattern="share_wifi"),
-            MessageHandler(filters.Regex("^Добавить Wi-Fi$"), share_wifi),  # Handle keyboard button
+            MessageHandler(filters.Regex("^Добавить Wi-Fi$"), share_wifi),
         ],
         states={
-            WIFI_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wifi_name)
-            ],
+            WIFI_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wifi_name)],
             WIFI_PASSWORD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wifi_password)
             ],
         },
-        fallbacks=[
-            CommandHandler("cancel", cancel_conversation)
-        ],
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
         allow_reentry=True,
     )
     application.add_handler(wifi_conversation_handler)
-    
-    # Add CommandHandler for /start
+
     application.add_handler(CommandHandler("start", start))
-    
-    # Add MessageHandler for photos
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
-    # Add CallbackQueryHandler for other buttons
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(?!share_wifi).*"))  # Exclude 'share_wifi' to avoid conflict
-    
+    application.add_handler(
+        CallbackQueryHandler(button_handler, pattern="^(?!share_wifi).*")
+    )
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_main_menu_selection)
+    )
 
-    # Add the generic MessageHandler last
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_main_menu_selection))
-    
-    # 2) Initialize the PTB Application
     await application.initialize()
-
-    # 3) Start the PTB Application (important for receiving updates)
     await application.start()
 
-    # 4) Set the webhook AFTER starting the application
+    # Set webhook
     webhook_url = f"{DOMAIN_NAME}/telegram"
     await application.bot.set_webhook(webhook_url)
     logger.info(f"Webhook set to {webhook_url}")
@@ -552,6 +590,4 @@ app.mount("/data", StaticFiles(directory=IMAGE_DIR), name="data")
 if __name__ == "__main__":
     import uvicorn
 
-    # Ensure you run on HTTPS if you’re exposing this publicly,
-    # or use an HTTPS reverse proxy in front of this app.
     uvicorn.run(app, host="0.0.0.0", port=7462)
