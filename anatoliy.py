@@ -227,14 +227,14 @@ def draw_username(img: Image.Image, username: str) -> None:
 
     # Position the text in the lower-left corner
     # 2 pixels from the left and 2 pixels from the bottom
-    x = 2
+    x = 1
     y = img.height - text_height - 2
 
     # Draw a black rectangle to serve as background for the white text
     # Expand it by 1 pixel on all sides if you want some padding around the text
     rect_x1 = x - 1
     rect_y1 = y - 1
-    rect_x2 = x + text_width + 1
+    rect_x2 = x + text_width + 2
     rect_y2 = y + text_height + 1
 
     draw.rectangle((rect_x1, rect_y1, rect_x2, rect_y2), fill=1)

@@ -21,6 +21,6 @@ COPY . .
 EXPOSE 7462
 
 # Command to run the application
-#CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "anatoliy:app", "--bind", "0.0.0.0:7462"]
-CMD ["uvicorn", "anatoliy:app", "--host", "0.0.0.0", "--port", "7462", "--reload"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "anatoliy:app", "--bind", "0.0.0.0:7462"]
+# CMD ["uvicorn", "anatoliy:app", "--host", "0.0.0.0", "--port", "7462", "--reload"]
 
