@@ -438,10 +438,10 @@ async def handle_main_menu_selection(update: Update, context: ContextTypes.DEFAU
         await share_wifi(update, context)
     elif user_selection == "об анатолии васильевиче":
         await help_command(update, context)
-    else:
-        await update.message.reply_text(
-            "Не понял, попробуй еще раз."
-        )
+    # else:
+    #     await update.message.reply_text(
+    #         "Не понял, попробуй еще раз."
+    #     )
 
 
 # Define the routes for the Starlette application
@@ -467,7 +467,7 @@ async def on_startup() -> None:
         entry_points=[
             CommandHandler("share_wifi", share_wifi),
             CallbackQueryHandler(share_wifi, pattern="share_wifi"),
-            MessageHandler(filters.Regex("^Share WiFi$"), share_wifi),  # Handle keyboard button
+            MessageHandler(filters.Regex("^Добавить Wi-Fi$"), share_wifi),  # Handle keyboard button
         ],
         states={
             WIFI_NAME: [
