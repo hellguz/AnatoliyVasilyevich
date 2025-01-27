@@ -273,7 +273,7 @@ async def get_last_img(request: Request) -> Response:
         img = img.resize((256, 122), Image.Resampling.NEAREST)
 
         # Convert to 1-bit black & white
-        img = img.convert("1", dither=Image.Dither.NONE)
+        img = img.convert("1", dither=Image.FLOYDSTEINBERG)
 
         # Draw username in the lower-right corner
         draw_username(img, username)
@@ -324,7 +324,7 @@ async def get_last_xbm(request: Request) -> Response:
         img = img.resize((256, 122), Image.Resampling.NEAREST)
 
         # Convert to pure 1-bit black & white
-        img = img.convert("1", dither=Image.Dither.NONE)
+        img = img.convert("1", dither=Image.FLOYDSTEINBERG)
 
         # Watermark
         draw_username(img, username)
